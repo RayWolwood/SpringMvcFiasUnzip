@@ -46,7 +46,9 @@ public class FilesStorageServiceImpl implements FilesStorageService {
         try {
             ZipInputStream inputStream = new ZipInputStream(file.getInputStream());
 
-            for (ZipEntry entry; (entry = inputStream.getNextEntry()) != null; ) {
+            ZipEntry entry;
+            while (inputStream.getNextEntry() != null){
+                entry = inputStream.getNextEntry();
                 Path resolvedPath = this.root.resolve(entry.getName());
                 if (!entry.isDirectory()) {
                     Files.createDirectories(resolvedPath.getParent());
