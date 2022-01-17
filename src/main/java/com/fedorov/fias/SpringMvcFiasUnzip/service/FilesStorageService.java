@@ -14,6 +14,8 @@ public interface FilesStorageService {
 
     void saveUnzip(MultipartFile file);
 
+    void unzipToCloud(MultipartFile file);
+
     void deleteAll();
 
     Resource load(String filename);

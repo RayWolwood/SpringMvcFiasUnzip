@@ -70,6 +70,24 @@ public class FilesController {
         }
     }
 
+    @PostMapping("/cloud")
+    public ResponseEntity<ResponseMessage> uploadCloud(@RequestParam("file") MultipartFile file) {
+        long startTime = System.currentTimeMillis();
+        String message;
+        try {
+            log.info("Начата загрузка файла {}", file.getOriginalFilename());
+            storageService.unzipToCloud(file);
+            long duration = System.currentTimeMillis() - startTime;
+            message = "Файл был загружен и распакован: " + file.getOriginalFilename() + " за " + duration + " мс";
+            log.info(message);
+            return ResponseEntity.status(HttpStatus.OK).body(new ResponseMessage(message));
+        } catch (Exception e) {
+            message = "Ошибка загрузки файла!";
+            log.info(message);
+            return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).body(new ResponseMessage(message));
+        }
+    }
+
     @GetMapping("/files")
     public ResponseEntity<List<FileInfo>> getListFiles() {
         List<FileInfo> fileInfos = storageService.loadAll().map(path -> {
