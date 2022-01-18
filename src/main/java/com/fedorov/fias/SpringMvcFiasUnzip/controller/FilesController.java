@@ -3,15 +3,11 @@ package com.fedorov.fias.SpringMvcFiasUnzip.controller;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.stream.Collectors;
 
 import com.fedorov.fias.SpringMvcFiasUnzip.message.ResponseMessage;
-import com.fedorov.fias.SpringMvcFiasUnzip.model.FileInfo;
 import com.fedorov.fias.SpringMvcFiasUnzip.service.FilesStorageService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.Resource;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
@@ -75,27 +71,17 @@ public class FilesController {
         long startTime = System.currentTimeMillis();
         String message;
         try {
-            log.info("Начата загрузка файла {}", file.getOriginalFilename());
+            log.info("Начата распаковка файла {}", file.getOriginalFilename());
             storageService.unzipToCloud(file);
             long duration = System.currentTimeMillis() - startTime;
             message = "Файл был загружен и распакован: " + file.getOriginalFilename() + " за " + duration + " мс";
             log.info(message);
             return ResponseEntity.status(HttpStatus.OK).body(new ResponseMessage(message));
         } catch (Exception e) {
-            message = "Ошибка загрузки файла!";
-            log.info(message);
+            message = "Ошибка загрузки файла! " + e;
+            log.error(message);
             return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).body(new ResponseMessage(message));
         }
-    }
-
-    @GetMapping("/files")
-    public ResponseEntity<List<FileInfo>> getListFiles() {
-        List<FileInfo> fileInfos = storageService.loadAll().map(path -> {
-            String filename = path.getFileName().toString();
-            return new FileInfo(filename);
-        }).collect(Collectors.toList());
-
-        return ResponseEntity.status(HttpStatus.OK).body(fileInfos);
     }
 
 }

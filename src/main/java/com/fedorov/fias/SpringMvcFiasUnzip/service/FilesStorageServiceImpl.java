@@ -1,6 +1,5 @@
 package com.fedorov.fias.SpringMvcFiasUnzip.service;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.nio.file.Files;
@@ -9,21 +8,20 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
-import com.amazonaws.SdkClientException;
-import com.amazonaws.auth.profile.ProfileCredentialsProvider;
-import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.*;
-import com.amazonaws.services.s3.transfer.TransferManager;
-import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
-import com.amazonaws.services.s3.transfer.Upload;
+import com.fedorov.fias.SpringMvcFiasUnzip.service.utils.ZipInputStream;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.compress.archivers.ArchiveEntry;
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
@@ -36,20 +34,19 @@ public class FilesStorageServiceImpl implements FilesStorageService {
 
     private final Path root = Paths.get("uploads");
 
+    @Value("${cloud.bucket}")
+    private String bucket;
     private final AmazonS3 s3Client;
 
-    @Autowired
-    public FilesStorageServiceImpl(AmazonS3 s3Client) {
-        this.s3Client = s3Client;
-    }
+    private int countRetry = 10;
 
-    @Override
-    public void init() {
-        try {
-            Files.createDirectory(root);
-        } catch (IOException e) {
-            throw new RuntimeException("Could not initialize folder for upload!");
-        }
+    private final Predicate<String> fileFilter;
+
+    @Autowired
+    public FilesStorageServiceImpl(AmazonS3 s3Client,
+                                   @Value("${unzip.unzip-ignore-patterns}") List<String> ignorePatterns) {
+        this.s3Client = s3Client;
+        this.fileFilter = getFilter(ignorePatterns);
     }
 
     @Override
@@ -62,65 +59,12 @@ public class FilesStorageServiceImpl implements FilesStorageService {
     }
 
     @Override
-    public void unzipToCloud(MultipartFile file) {
-
-        try {
-            ZipInputStream zipInputStream = new ZipInputStream(file.getInputStream());
-            ObjectMetadata objectMetadata = new ObjectMetadata();
-
-
-            for (ZipEntry entry; (entry = zipInputStream.getNextEntry()) != null; ) {
-                List<PartETag> partETags = new ArrayList<>();
-                String resolvePath = "unzipped/" + entry.getName();
-                InitiateMultipartUploadRequest initRequest = new InitiateMultipartUploadRequest("fias-fedorov", resolvePath);
-                InitiateMultipartUploadResult initResponse = s3Client.initiateMultipartUpload(initRequest);
-
-                long partSize = 5 * 1024 * 1024; // Set part size to 5 MB.
-//                long partSize = 4096;
-                long filePosition = 0;
-                long contentLength = entry.getSize();
-                for (int i = 1; filePosition < contentLength; i++) {
-                    // Because the last part could be less than 5 MB, adjust the part size as needed.
-                    partSize = Math.min(partSize, (contentLength - filePosition));
-
-                    // Create the request to upload a part.
-                    UploadPartRequest uploadRequest = new UploadPartRequest()
-                            .withBucketName("fias-fedorov")
-                            .withKey(resolvePath)
-                            .withUploadId(initResponse.getUploadId())
-                            .withPartNumber(i)
-                            .withFileOffset(filePosition)
-//                            .withFile(file)
-                            .withInputStream(zipInputStream)
-                            .withPartSize(partSize);
-
-                    // Upload the part and add the response's ETag to our list.
-                    UploadPartResult uploadResult = s3Client.uploadPart(uploadRequest);
-                    partETags.add(uploadResult.getPartETag());
-
-                    filePosition += partSize;
-                }
-
-                // Complete the multipart upload.
-                CompleteMultipartUploadRequest compRequest = new CompleteMultipartUploadRequest("fias-fedorov", resolvePath,
-                        initResponse.getUploadId(), partETags);
-                s3Client.completeMultipartUpload(compRequest);
-
-
-            }
-
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-    }
-
-    @Override
     public void saveUnzip(MultipartFile file) {
         try {
-            ZipInputStream inputStream = new ZipInputStream(file.getInputStream());
+            java.util.zip.ZipInputStream inputStream = new java.util.zip.ZipInputStream(file.getInputStream());
 
             ZipEntry entry;
-            while (inputStream.getNextEntry() != null){
+            while (inputStream.getNextEntry() != null) {
                 entry = inputStream.getNextEntry();
                 Path resolvedPath = this.root.resolve(entry.getName());
                 if (!entry.isDirectory()) {
@@ -137,32 +81,84 @@ public class FilesStorageServiceImpl implements FilesStorageService {
     }
 
     @Override
-    public Resource load(String filename) {
-        try {
-            Path file = root.resolve(filename);
-            Resource resource = new UrlResource(file.toUri());
+    public void unzipToCloud(MultipartFile file) {
 
-            if (resource.exists() || resource.isReadable()) {
-                return resource;
-            } else {
-                throw new RuntimeException("Could not read the file!");
+        try (ZipInputStream zipInputStream = new ZipInputStream(new ZipArchiveInputStream(file.getInputStream()))) {
+            zipInputStream.forEachEntry(fileFilter, entry -> lowLevelMultipartUpload(entry, zipInputStream));
+        } catch (Exception e) {
+            log.error("Unzip error: ", e);
+        }
+
+//        try {
+//            java.util.zip.ZipInputStream zipInputStream = new java.util.zip.ZipInputStream(file.getInputStream());
+//            for (ZipEntry entry; (entry = zipInputStream.getNextEntry()) != null; ) {
+//                if (entry.getSize() != 0) {
+//                    lowLevelMultipartUpload(entry, zipInputStream);
+//                }
+//            }
+//            zipInputStream.close();
+//
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//        }
+    }
+
+    private void lowLevelMultipartUpload(ArchiveEntry entry, ZipInputStream zipInputStream) {
+        long partSize = 5L * 1024 * 1024; // Set part size to -> x MB.
+        long contentLength = entry.getSize();
+        long partCount = calculatePartCount(partSize, contentLength);
+
+        List<PartETag> partETags = new ArrayList<>();
+        String resolvePath = "unzipped2/" + entry.getName();
+        InitiateMultipartUploadRequest initRequest = new InitiateMultipartUploadRequest(bucket, resolvePath);
+        InitiateMultipartUploadResult initResponse = s3Client.initiateMultipartUpload(initRequest);
+
+        long filePosition = 0;
+
+        for (int i = 1; filePosition < contentLength; i++) {
+            partSize = Math.min(partSize, (contentLength - filePosition));
+
+            UploadPartRequest uploadRequest = new UploadPartRequest()
+                    .withBucketName(bucket)
+                    .withKey(resolvePath)
+                    .withUploadId(initResponse.getUploadId())
+                    .withPartNumber(i)
+                    .withInputStream(zipInputStream)
+                    .withPartSize(partSize);
+
+            uploadRequest.getRequestClientOptions().setReadLimit(10_000_000);
+
+            while (countRetry != 0) {
+                try {
+                    UploadPartResult uploadResult = s3Client.uploadPart(uploadRequest);
+                    partETags.add(uploadResult.getPartETag());
+                    log.info("Загрузка файла {}, часть ({} из {})", entry.getName(), i, partCount);
+                    filePosition += partSize;
+                    break;
+                } catch (Exception e) {
+                    countRetry--;
+                    log.error("Ошибка отправки части файла, осталось попыток: {}", countRetry);
+                    e.printStackTrace();
+                }
             }
-        } catch (MalformedURLException e) {
-            throw new RuntimeException("Error: " + e.getMessage());
         }
+
+        CompleteMultipartUploadRequest compRequest = new CompleteMultipartUploadRequest(bucket, resolvePath,
+                initResponse.getUploadId(), partETags);
+
+        s3Client.completeMultipartUpload(compRequest);
     }
 
-    @Override
-    public void deleteAll() {
-        FileSystemUtils.deleteRecursively(root.toFile());
+    private long calculatePartCount(long partSize, long contentLength) {
+        double d = ((double) contentLength) / ((double) partSize);
+        double result = Math.ceil(d);
+        return (long) result < 0 ? 1 : (long) result;
     }
 
-    @Override
-    public Stream<Path> loadAll() {
-        try {
-            return Files.walk(this.root, 1).filter(path -> !path.equals(this.root)).map(this.root::relativize);
-        } catch (IOException e) {
-            throw new RuntimeException("Could not load the files!");
-        }
+    private Predicate<String> getFilter(List<String> ignorePatterns) {
+        List<Pattern> ignorePatternsList = ignorePatterns.stream()
+                .map(fileName -> Pattern.compile(".*" + fileName + ".*"))
+                .collect(Collectors.toList());
+        return fileName -> ignorePatternsList.stream().noneMatch(pattern -> pattern.matcher(fileName).matches());
     }
 }
